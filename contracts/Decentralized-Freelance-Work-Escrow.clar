@@ -328,3 +328,88 @@
 (define-read-only (get-contract-balance)
   (stx-get-balance (as-contract tx-sender))
 )
+
+(define-map user-reputation
+  principal
+  {
+    projects-completed: uint,
+    projects-disputed: uint,
+    total-projects: uint,
+    on-time-deliveries: uint,
+    last-activity: uint
+  }
+)
+
+(define-private (update-reputation (user principal) (completed bool) (disputed bool) (on-time bool))
+  (let
+    (
+      (current-rep (default-to 
+        { projects-completed: u0, projects-disputed: u0, total-projects: u0, on-time-deliveries: u0, last-activity: u0 }
+        (map-get? user-reputation user)))
+      (new-completed (if completed (+ (get projects-completed current-rep) u1) (get projects-completed current-rep)))
+      (new-disputed (if disputed (+ (get projects-disputed current-rep) u1) (get projects-disputed current-rep)))
+      (new-total (+ (get total-projects current-rep) u1))
+      (new-on-time (if on-time (+ (get on-time-deliveries current-rep) u1) (get on-time-deliveries current-rep)))
+    )
+    (map-set user-reputation user
+      {
+        projects-completed: new-completed,
+        projects-disputed: new-disputed,
+        total-projects: new-total,
+        on-time-deliveries: new-on-time,
+        last-activity: stacks-block-height
+      }
+    )
+  )
+)
+
+(define-public (track-project-completion (project-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (is-on-time (match (get submitted-at project)
+        submitted-block (<= submitted-block (get deadline project))
+        false))
+    )
+    (asserts! (is-eq (get status project) STATUS_COMPLETED) ERR_INVALID_STATUS)
+    
+    (update-reputation (get freelancer project) true false is-on-time)
+    (update-reputation (get client project) true false true)
+    (ok true)
+  )
+)
+
+(define-public (track-project-dispute (project-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+    )
+    (asserts! (is-eq (get status project) STATUS_DISPUTED) ERR_INVALID_STATUS)
+    
+    (update-reputation (get freelancer project) false true false)
+    (update-reputation (get client project) false true false)
+    (ok true)
+  )
+)
+
+(define-read-only (get-user-reputation (user principal))
+  (map-get? user-reputation user)
+)
+
+(define-read-only (calculate-reputation-score (user principal))
+  (match (map-get? user-reputation user)
+    rep-data (let
+      (
+        (total (get total-projects rep-data))
+        (completed (get projects-completed rep-data))
+        (disputed (get projects-disputed rep-data))
+        (on-time (get on-time-deliveries rep-data))
+      )
+      (if (is-eq total u0)
+        (ok u0)
+        (ok (/ (* (+ (* completed u60) (* on-time u30) (* (- total disputed) u10)) u100) total))
+      )
+    )
+    (ok u0)
+  )
+)
