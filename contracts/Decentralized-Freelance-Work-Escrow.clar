@@ -16,6 +16,11 @@
 (define-constant STATUS_DISPUTED u5)
 (define-constant STATUS_CANCELLED u6)
 
+(define-constant MILESTONE_STATUS_CREATED u0)
+(define-constant MILESTONE_STATUS_FUNDED u1)
+(define-constant MILESTONE_STATUS_SUBMITTED u2)
+(define-constant MILESTONE_STATUS_APPROVED u3)
+
 (define-data-var project-counter uint u0)
 
 (define-map projects
@@ -412,4 +417,128 @@
     )
     (ok u0)
   )
+)
+
+(define-map project-milestones
+  { project-id: uint, milestone-id: uint }
+  {
+    title: (string-ascii 100),
+    amount: uint,
+    deadline: uint,
+    status: uint,
+    funded-at: (optional uint),
+    submitted-at: (optional uint),
+    approved-at: (optional uint)
+  }
+)
+
+(define-map milestone-counter uint uint)
+
+
+(define-public (create-milestone 
+  (project-id uint)
+  (title (string-ascii 100))
+  (amount uint)
+  (deadline uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (current-count (default-to u0 (map-get? milestone-counter project-id)))
+      (milestone-id (+ current-count u1))
+    )
+    (asserts! (is-eq tx-sender (get client project)) ERR_NOT_AUTHORIZED)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> deadline stacks-block-height) ERR_DEADLINE_PASSED)
+    
+    (map-set project-milestones 
+      { project-id: project-id, milestone-id: milestone-id }
+      {
+        title: title,
+        amount: amount,
+        deadline: deadline,
+        status: MILESTONE_STATUS_CREATED,
+        funded-at: none,
+        submitted-at: none,
+        approved-at: none
+      }
+    )
+    
+    (map-set milestone-counter project-id milestone-id)
+    (ok milestone-id)
+  )
+)
+
+(define-public (fund-milestone (project-id uint) (milestone-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (milestone (unwrap! (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id }) ERR_PROJECT_NOT_FOUND))
+      (amount (get amount milestone))
+    )
+    (asserts! (is-eq tx-sender (get client project)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status milestone) MILESTONE_STATUS_CREATED) ERR_INVALID_STATUS)
+    
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    
+    (map-set project-milestones 
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone { 
+        status: MILESTONE_STATUS_FUNDED,
+        funded-at: (some stacks-block-height)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (submit-milestone (project-id uint) (milestone-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (milestone (unwrap! (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id }) ERR_PROJECT_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get freelancer project)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status milestone) MILESTONE_STATUS_FUNDED) ERR_INVALID_STATUS)
+    (asserts! (< stacks-block-height (get deadline milestone)) ERR_DEADLINE_PASSED)
+    
+    (map-set project-milestones 
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone { 
+        status: MILESTONE_STATUS_SUBMITTED,
+        submitted-at: (some stacks-block-height)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (approve-milestone (project-id uint) (milestone-id uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (milestone (unwrap! (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id }) ERR_PROJECT_NOT_FOUND))
+      (amount (get amount milestone))
+    )
+    (asserts! (is-eq tx-sender (get client project)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status milestone) MILESTONE_STATUS_SUBMITTED) ERR_INVALID_STATUS)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender (get freelancer project))))
+    
+    (map-set project-milestones 
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone { 
+        status: MILESTONE_STATUS_APPROVED,
+        approved-at: (some stacks-block-height)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-milestone (project-id uint) (milestone-id uint))
+  (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id })
+)
+
+(define-read-only (get-milestone-count (project-id uint))
+  (default-to u0 (map-get? milestone-counter project-id))
 )
