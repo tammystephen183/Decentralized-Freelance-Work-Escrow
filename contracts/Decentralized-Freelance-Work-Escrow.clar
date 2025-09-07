@@ -21,6 +21,11 @@
 (define-constant MILESTONE_STATUS_SUBMITTED u2)
 (define-constant MILESTONE_STATUS_APPROVED u3)
 
+(define-constant ERR_TEMPLATE_NOT_FOUND (err u108))
+(define-constant ERR_TEMPLATE_EXISTS (err u109))
+
+(define-data-var template-counter uint u0)
+
 (define-data-var project-counter uint u0)
 
 (define-map projects
@@ -541,4 +546,117 @@
 
 (define-read-only (get-milestone-count (project-id uint))
   (default-to u0 (map-get? milestone-counter project-id))
+)
+
+
+(define-map project-templates
+  uint
+  {
+    creator: principal,
+    title: (string-ascii 100),
+    description: (string-ascii 500),
+    category: (string-ascii 50),
+    suggested-amount: uint,
+    suggested-deadline-blocks: uint,
+    usage-count: uint,
+    created-at: uint,
+    active: bool
+  }
+)
+
+(define-map user-templates
+  principal
+  (list 20 uint)
+)
+
+(define-public (create-template
+  (title (string-ascii 100))
+  (description (string-ascii 500))
+  (category (string-ascii 50))
+  (suggested-amount uint)
+  (suggested-deadline-blocks uint))
+  (let
+    (
+      (template-id (+ (var-get template-counter) u1))
+    )
+    (asserts! (> suggested-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> suggested-deadline-blocks u0) ERR_INVALID_AMOUNT)
+    
+    (map-set project-templates template-id
+      {
+        creator: tx-sender,
+        title: title,
+        description: description,
+        category: category,
+        suggested-amount: suggested-amount,
+        suggested-deadline-blocks: suggested-deadline-blocks,
+        usage-count: u0,
+        created-at: stacks-block-height,
+        active: true
+      }
+    )
+    
+    (var-set template-counter template-id)
+    (update-user-templates tx-sender template-id)
+    (ok template-id)
+  )
+)
+
+(define-public (create-project-from-template
+  (template-id uint)
+  (freelancer principal))
+  (let
+    (
+      (template (unwrap! (map-get? project-templates template-id) ERR_TEMPLATE_NOT_FOUND))
+      (deadline (+ stacks-block-height (get suggested-deadline-blocks template)))
+      (project-id (+ (var-get project-counter) u1))
+    )
+    (asserts! (get active template) ERR_TEMPLATE_NOT_FOUND)
+    (asserts! (not (is-eq tx-sender freelancer)) ERR_NOT_AUTHORIZED)
+    
+    (map-set projects project-id
+      {
+        client: tx-sender,
+        freelancer: freelancer,
+        amount: (get suggested-amount template),
+        deadline: deadline,
+        status: STATUS_CREATED,
+        title: (get title template),
+        description: (get description template),
+        created-at: stacks-block-height,
+        submitted-at: none,
+        completed-at: none
+      }
+    )
+    
+    (map-set project-templates template-id
+      (merge template { usage-count: (+ (get usage-count template) u1) })
+    )
+    
+    (var-set project-counter project-id)
+    (update-user-projects tx-sender project-id)
+    (update-user-projects freelancer project-id)
+    (ok project-id)
+  )
+)
+
+(define-private (update-user-templates (user principal) (template-id uint))
+  (let
+    (
+      (current-templates (default-to (list) (map-get? user-templates user)))
+    )
+    (map-set user-templates user (unwrap-panic (as-max-len? (append current-templates template-id) u20)))
+  )
+)
+
+(define-read-only (get-template (template-id uint))
+  (map-get? project-templates template-id)
+)
+
+(define-read-only (get-user-templates (user principal))
+  (default-to (list) (map-get? user-templates user))
+)
+
+(define-read-only (get-template-counter)
+  (var-get template-counter)
 )
