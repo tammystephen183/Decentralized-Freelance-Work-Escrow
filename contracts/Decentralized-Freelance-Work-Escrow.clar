@@ -24,6 +24,14 @@
 (define-constant ERR_TEMPLATE_NOT_FOUND (err u108))
 (define-constant ERR_TEMPLATE_EXISTS (err u109))
 
+(define-constant ERR_REFERRAL_EXISTS (err u110))
+(define-constant ERR_INVALID_REFERRAL (err u111))
+(define-constant ERR_REWARD_LOCKED (err u112))
+(define-constant REFERRAL_REWARD_PERCENTAGE u5)
+(define-constant REWARD_LOCK_BLOCKS u4320)
+
+(define-data-var referral-counter uint u0)
+
 (define-data-var template-counter uint u0)
 
 (define-data-var project-counter uint u0)
@@ -659,4 +667,140 @@
 
 (define-read-only (get-template-counter)
   (var-get template-counter)
+)
+
+(define-map user-referrals
+  principal
+  {
+    referrer: (optional principal),
+    referral-code: uint,
+    referred-users: uint,
+    total-rewards: uint,
+    locked-rewards: uint
+  }
+)
+
+(define-map referral-rewards
+  { user: principal, reward-id: uint }
+  {
+    amount: uint,
+    unlock-height: uint,
+    source-project: uint,
+    claimed: bool
+  }
+)
+
+(define-map reward-counter principal uint)
+
+(define-public (create-referral-code)
+  (let
+    (
+      (existing-ref (map-get? user-referrals tx-sender))
+      (new-code (+ (var-get referral-counter) u1))
+    )
+    (asserts! (is-none existing-ref) ERR_REFERRAL_EXISTS)
+    
+    (map-set user-referrals tx-sender
+      {
+        referrer: none,
+        referral-code: new-code,
+        referred-users: u0,
+        total-rewards: u0,
+        locked-rewards: u0
+      }
+    )
+    
+    (var-set referral-counter new-code)
+    (ok new-code)
+  )
+)
+
+(define-public (register-with-referral (referrer-code uint))
+  (let
+    (
+      (referrer (unwrap! (get-principal-by-code referrer-code) ERR_INVALID_REFERRAL))
+      (existing-ref (map-get? user-referrals tx-sender))
+      (new-code (+ (var-get referral-counter) u1))
+    )
+    (asserts! (is-none existing-ref) ERR_REFERRAL_EXISTS)
+    (asserts! (not (is-eq referrer tx-sender)) ERR_NOT_AUTHORIZED)
+    
+    (map-set user-referrals tx-sender
+      {
+        referrer: (some referrer),
+        referral-code: new-code,
+        referred-users: u0,
+        total-rewards: u0,
+        locked-rewards: u0
+      }
+    )
+    
+    (increment-referred-count referrer)
+    (var-set referral-counter new-code)
+    (ok new-code)
+  )
+)
+
+(define-public (claim-referral-reward (reward-id uint))
+  (let
+    (
+      (reward (unwrap! (map-get? referral-rewards { user: tx-sender, reward-id: reward-id }) ERR_PROJECT_NOT_FOUND))
+      (amount (get amount reward))
+    )
+    (asserts! (not (get claimed reward)) ERR_ALREADY_EXISTS)
+    (asserts! (>= stacks-block-height (get unlock-height reward)) ERR_REWARD_LOCKED)
+    
+    (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+    
+    (map-set referral-rewards { user: tx-sender, reward-id: reward-id }
+      (merge reward { claimed: true })
+    )
+    
+    (unlock-user-rewards tx-sender amount)
+    (ok amount)
+  )
+)
+
+(define-private (get-principal-by-code (code uint))
+  (fold check-referral-match (list CONTRACT_OWNER) none)
+)
+
+(define-private (check-referral-match (user principal) (result (optional principal)))
+  (match result
+    found (some found)
+    (match (map-get? user-referrals user)
+      ref-data (if (is-eq (get referral-code ref-data) u0) none (some user))
+      none
+    )
+  )
+)
+
+(define-private (increment-referred-count (referrer principal))
+  (match (map-get? user-referrals referrer)
+    ref-data (map-set user-referrals referrer
+      (merge ref-data { referred-users: (+ (get referred-users ref-data) u1) })
+    )
+    false
+  )
+)
+
+(define-private (unlock-user-rewards (user principal) (amount uint))
+  (match (map-get? user-referrals user)
+    ref-data (map-set user-referrals user
+      (merge ref-data { locked-rewards: (- (get locked-rewards ref-data) amount) })
+    )
+    false
+  )
+)
+
+(define-read-only (get-referral-data (user principal))
+  (map-get? user-referrals user)
+)
+
+(define-read-only (get-reward-data (user principal) (reward-id uint))
+  (map-get? referral-rewards { user: user, reward-id: reward-id })
+)
+
+(define-read-only (get-user-reward-count (user principal))
+  (default-to u0 (map-get? reward-counter user))
 )
