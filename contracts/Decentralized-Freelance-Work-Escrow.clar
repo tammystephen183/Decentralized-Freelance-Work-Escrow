@@ -30,6 +30,10 @@
 (define-constant REFERRAL_REWARD_PERCENTAGE u5)
 (define-constant REWARD_LOCK_BLOCKS u4320)
 
+(define-constant ERR_CANNOT_ENDORSE_SELF (err u113))
+(define-constant ERR_ALREADY_ENDORSED (err u114))
+(define-constant ERR_PROJECT_NOT_COMPLETED (err u115))
+
 (define-data-var referral-counter uint u0)
 
 (define-data-var template-counter uint u0)
@@ -803,4 +807,113 @@
 
 (define-read-only (get-user-reward-count (user principal))
   (default-to u0 (map-get? reward-counter user))
+)
+
+(define-map user-skills
+  { user: principal, skill-category: (string-ascii 30) }
+  {
+    endorsement-count: uint,
+    total-projects: uint,
+    skill-points: uint,
+    last-updated: uint
+  }
+)
+
+(define-map skill-endorsements
+  { project-id: uint, endorser: principal, endorsed: principal }
+  {
+    skill-category: (string-ascii 30),
+    rating: uint,
+    timestamp: uint
+  }
+)
+
+(define-map user-badges
+  { user: principal, badge-type: (string-ascii 30) }
+  {
+    earned-at: uint,
+    skill-category: (string-ascii 30),
+    unlock-threshold: uint
+  }
+)
+
+(define-public (endorse-skill
+  (project-id uint)
+  (endorsed-user principal)
+  (skill-category (string-ascii 30))
+  (rating uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (endorsement-key { project-id: project-id, endorser: tx-sender, endorsed: endorsed-user })
+      (skill-key { user: endorsed-user, skill-category: skill-category })
+      (current-skill (default-to { endorsement-count: u0, total-projects: u0, skill-points: u0, last-updated: u0 }
+        (map-get? user-skills skill-key)))
+    )
+    (asserts! (is-eq (get status project) STATUS_COMPLETED) ERR_PROJECT_NOT_COMPLETED)
+    (asserts! (not (is-eq tx-sender endorsed-user)) ERR_CANNOT_ENDORSE_SELF)
+    (asserts! (or (is-eq tx-sender (get client project)) (is-eq tx-sender (get freelancer project))) ERR_NOT_AUTHORIZED)
+    (asserts! (or (is-eq endorsed-user (get client project)) (is-eq endorsed-user (get freelancer project))) ERR_NOT_AUTHORIZED)
+    (asserts! (is-none (map-get? skill-endorsements endorsement-key)) ERR_ALREADY_ENDORSED)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR_INVALID_AMOUNT)
+    
+    (map-set skill-endorsements endorsement-key
+      {
+        skill-category: skill-category,
+        rating: rating,
+        timestamp: stacks-block-height
+      }
+    )
+    
+    (map-set user-skills skill-key
+      {
+        endorsement-count: (+ (get endorsement-count current-skill) u1),
+        total-projects: (+ (get total-projects current-skill) u1),
+        skill-points: (+ (get skill-points current-skill) (* rating u10)),
+        last-updated: stacks-block-height
+      }
+    )
+    
+    (check-and-unlock-badge endorsed-user skill-category (+ (get skill-points current-skill) (* rating u10)))
+  )
+)
+
+(define-private (check-and-unlock-badge (user principal) (skill-category (string-ascii 30)) (points uint))
+  (ok (begin
+    (if (and (>= points u100) (< points u250))
+      (unlock-badge user skill-category "Bronze" u100)
+      true
+    )
+    (if (and (>= points u250) (< points u500))
+      (unlock-badge user skill-category "Silver" u250)
+      true
+    )
+    (if (>= points u500)
+      (unlock-badge user skill-category "Gold" u500)
+      true
+    )
+    true
+  ))
+)
+
+(define-private (unlock-badge (user principal) (skill-category (string-ascii 30)) (badge-type (string-ascii 30)) (threshold uint))
+  (map-set user-badges { user: user, badge-type: badge-type }
+    {
+      earned-at: stacks-block-height,
+      skill-category: skill-category,
+      unlock-threshold: threshold
+    }
+  )
+)
+
+(define-read-only (get-user-skill (user principal) (skill-category (string-ascii 30)))
+  (map-get? user-skills { user: user, skill-category: skill-category })
+)
+
+(define-read-only (get-endorsement (project-id uint) (endorser principal) (endorsed principal))
+  (map-get? skill-endorsements { project-id: project-id, endorser: endorser, endorsed: endorsed })
+)
+
+(define-read-only (get-user-badge (user principal) (badge-type (string-ascii 30)))
+  (map-get? user-badges { user: user, badge-type: badge-type })
 )
